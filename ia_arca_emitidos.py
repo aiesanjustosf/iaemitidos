@@ -1,5 +1,8 @@
 # ia_arca_emitidos.py
 # Conversión ARCA "Emitidos" (XLSX o CSV) -> Formato Holistor (HWVta1modelo)
+# - CSV: usa TABLAARCA.xlsx para decodificar Tipo de Comprobante (código) => (Cpbte, Letra)
+# - XLSX: usa TABLAARCA si detecta código, sino parsea texto
+# Reglas: NC negativo, ignorar 0%/2,5%/5%, ignorar filas sin montos, Tipo Doc numérico (80/96), códigos vacíos (manual)
 # AIE San Justo
 
 import streamlit as st
@@ -11,8 +14,15 @@ import re
 import zipfile
 import xml.etree.ElementTree as ET
 
-# --- Rutas de assets ---
+# ---------------- UI / Assets ----------------
+
 HERE = Path(__file__).parent
+
+# En tu repo actual, todo está dentro de /assets:
+# - ia_arca_emitidos.py
+# - TABLAARCA.xlsx
+# - logo_aie.png
+# - favicon-aie.ico
 LOGO = HERE / "logo_aie.png"
 FAVICON = HERE / "favicon-aie.ico"
 
@@ -28,16 +38,24 @@ if LOGO.exists():
 st.title("ARCA Emitidos → Formato Holistor")
 
 st.write(
-    "Subí el archivo original de **ARCA** (Libro IVA Digital - Ventas/Emitidos) en **XLSX o CSV**.\n\n"
-    "- Si subís **CSV**, también subí **TABLAARCA** para decodificar el **Tipo de Comprobante** (código) "
-    "a **Cpbte (F/NC/ND/R)** y **Tipo (A/B/C)**.\n"
-    "- En el CSV, **Tipo Doc. Receptor** ya viene como **80/96**, se toma directo."
+    "Subí el archivo de **ARCA Emitidos** (Libro IVA Digital - Ventas) en **XLSX o CSV**.\n\n"
+    "La app usa **TABLAARCA.xlsx** desde el repo para decodificar el **Tipo de Comprobante** cuando el archivo es CSV.\n"
+    "Solo marcá “Actualizar TABLAARCA” si necesitás reemplazar la tabla."
 )
 
 uploaded = st.file_uploader("Subí ARCA Emitidos (.xlsx o .csv)", type=["xlsx", "csv"])
-tablaarca_file = st.file_uploader("Subí TABLAARCA (.xlsx o .csv)", type=["xlsx", "csv"])
 
-# ---------------- Helpers ----------------
+# Override opcional para TABLAARCA
+actualizar_tabla = st.checkbox("Actualizar TABLAARCA (solo si cambió)", value=False)
+tablaarca_override = None
+if actualizar_tabla:
+    tablaarca_override = st.file_uploader(
+        "Subí TABLAARCA (override) (.xlsx o .csv)",
+        type=["xlsx", "csv"],
+        key="tablaarca_uploader",
+    )
+
+# ---------------- Helpers generales ----------------
 
 def sniff_delimiter(text: str) -> str:
     try:
@@ -47,6 +65,7 @@ def sniff_delimiter(text: str) -> str:
         return ";"  # típico ARCA
 
 def read_arca_file(file) -> tuple[pd.DataFrame, str]:
+    """Devuelve (df, kind) donde kind es 'csv' o 'xlsx'."""
     name = (file.name or "").lower()
     if name.endswith(".csv"):
         raw = file.getvalue().decode("utf-8", errors="replace")
@@ -54,11 +73,11 @@ def read_arca_file(file) -> tuple[pd.DataFrame, str]:
         df = pd.read_csv(BytesIO(file.getvalue()), sep=sep, dtype=str, encoding="utf-8")
         return df, "csv"
 
-    # XLSX: ARCA suele tener encabezado real en fila 2
+    # XLSX: ARCA suele tener encabezados reales en fila 2 (header=1)
     try:
-        return pd.read_excel(file, sheet_name=0, header=1), "xlsx"
+        return pd.read_excel(file, sheet_name=0, header=1, dtype=object), "xlsx"
     except Exception:
-        return pd.read_excel(file, sheet_name=0, header=0), "xlsx"
+        return pd.read_excel(file, sheet_name=0, header=0, dtype=object), "xlsx"
 
 def pick_col(df: pd.DataFrame, *candidates: str) -> str:
     cols = set(df.columns)
@@ -90,10 +109,7 @@ def parse_amount(v) -> float:
         return 0.0
 
 def tipo_doc_numeric(v) -> int:
-    """
-    En CSV ARCA viene numérico (80/96). Tomarlo directo.
-    Si llega texto no numérico (por XLSX u otro), intenta parsear; si falla devuelve 0.
-    """
+    """En CSV suele venir 80/96. En XLSX puede venir numérico también."""
     if v is None:
         return 0
     if isinstance(v, float) and pd.isna(v):
@@ -106,33 +122,31 @@ def tipo_doc_numeric(v) -> int:
     except Exception:
         return 0
 
-# --- TABLAARCA: lectura robusta (incluye tu TABLAARCACGT.xlsx que puede no abrir con openpyxl) ---
+# ---------------- TABLAARCA robusta ----------------
+# Motivo: algunos xlsx “raros” pueden romper openpyxl. Dejamos fallback por XML.
 
 def _strip_ns(tag: str) -> str:
     return tag.split("}", 1)[1] if "}" in tag else tag
 
-def read_tablaarca_any(file) -> pd.DataFrame:
-    """
-    Lee TABLAARCA desde XLSX/CSV. Para XLSX "no estándar", parsea sheet1.xml + sharedStrings.xml.
-    Espera columnas: Código | Descripción | Tipo | Letra
-    """
-    name = (file.name or "").lower()
+def read_tablaarca_any_bytes(file_bytes: bytes, filename: str) -> pd.DataFrame:
+    """Lee TABLAARCA desde bytes (XLSX/CSV)."""
+    fn = (filename or "").lower()
 
-    if name.endswith(".csv"):
-        raw = file.getvalue().decode("utf-8", errors="replace")
+    if fn.endswith(".csv"):
+        raw = file_bytes.decode("utf-8", errors="replace")
         sep = sniff_delimiter(raw)
-        return pd.read_csv(BytesIO(file.getvalue()), sep=sep, dtype=str, encoding="utf-8")
+        return pd.read_csv(BytesIO(file_bytes), sep=sep, dtype=str, encoding="utf-8")
 
     # 1) intento normal
     try:
-        return pd.read_excel(file, sheet_name=0, dtype=str)
+        return pd.read_excel(BytesIO(file_bytes), sheet_name=0, dtype=str)
     except Exception:
         pass
 
     # 2) fallback XML (xlsx)
-    content = file.getvalue()
-    zf = zipfile.ZipFile(BytesIO(content))
+    zf = zipfile.ZipFile(BytesIO(file_bytes))
 
+    # shared strings
     shared = []
     sst_xml = zf.read("xl/sharedStrings.xml").decode("utf-8", errors="ignore")
     sst_root = ET.fromstring(sst_xml)
@@ -145,6 +159,7 @@ def read_tablaarca_any(file) -> pd.DataFrame:
                 texts.append(ch.text or "")
         shared.append("".join(texts))
 
+    # sheet1
     sheet_xml = zf.read("xl/worksheets/sheet1.xml").decode("utf-8", errors="ignore")
     root = ET.fromstring(sheet_xml)
     ns = {"s": root.tag.split("}")[0].strip("{")}
@@ -156,16 +171,16 @@ def read_tablaarca_any(file) -> pd.DataFrame:
             idx = idx * 26 + (ord(ch) - 64)
         return idx - 1
 
-    def cell_ref_to_rc(r: str):
+    def cell_ref_to_col(r: str):
         m = re.match(r"([A-Z]+)(\d+)", r)
-        return int(m.group(2)) - 1, col_letter_to_index(m.group(1))
+        return col_letter_to_index(m.group(1))
 
     rows = []
     for r in sheetData.findall("s:row", ns):
         cells = {}
         for c in r.findall("s:c", ns):
             ref = c.attrib.get("r", "")
-            _, col_idx = cell_ref_to_rc(ref)
+            col_idx = cell_ref_to_col(ref)
             t = c.attrib.get("t")
             v = c.find("s:v", ns)
             if v is None:
@@ -174,43 +189,36 @@ def read_tablaarca_any(file) -> pd.DataFrame:
             if t == "s":
                 val = shared[int(val)]
             cells[col_idx] = val
+        if cells:
+            # tomamos A-D
+            rows.append([cells.get(i, "") for i in range(4)])
 
-        if not cells:
-            continue
-
-        # Tomamos columnas A-D
-        rows.append([cells.get(i, "") for i in range(4)])
-
-    # Buscar header "Código" / "Descripción" / "Tipo" / "Letra"
+    # encontrar header
     header_i = None
     for i, r in enumerate(rows):
-        if [x.strip().upper() for x in r[:4]] == ["CÓDIGO", "DESCRIPCIÓN", "TIPO", "LETRA"] or \
-           [x.strip().upper() for x in r[:4]] == ["CODIGO", "DESCRIPCIÓN", "TIPO", "LETRA"] or \
-           [x.strip().upper() for x in r[:4]] == ["CÓDIGO", "DESCRIPCION", "TIPO", "LETRA"] or \
-           [x.strip().upper() for x in r[:4]] == ["CODIGO", "DESCRIPCION", "TIPO", "LETRA"]:
+        r0 = [str(x).strip().upper() for x in r[:4]]
+        if r0 in (["CÓDIGO","DESCRIPCIÓN","TIPO","LETRA"], ["CODIGO","DESCRIPCIÓN","TIPO","LETRA"],
+                  ["CÓDIGO","DESCRIPCION","TIPO","LETRA"], ["CODIGO","DESCRIPCION","TIPO","LETRA"]):
             header_i = i
             break
-
     if header_i is None:
-        # fallback: asumir 2da fila como header (como en tu archivo)
-        header_i = 1
+        header_i = 0
 
     data = rows[header_i + 1 :]
-    out = pd.DataFrame(data, columns=["Código", "Descripción", "Tipo", "Letra"])
-    return out
+    return pd.DataFrame(data, columns=["Código", "Descripción", "Tipo", "Letra"])
 
 def build_tabla_lookup(tabla: pd.DataFrame) -> dict:
     """
     Lookup por código: { '1': ('F','A'), '3': ('NC','A'), ... }
+    Espera columnas: Código / Tipo / Letra (mayúsculas o no).
     """
-    # normalizar nombres posibles
-    cols = {c.strip().lower(): c for c in tabla.columns}
-    col_cod = cols.get("código") or cols.get("codigo") or cols.get("cód.") or cols.get("cod.")
+    cols = {str(c).strip().lower(): c for c in tabla.columns}
+    col_cod = cols.get("código") or cols.get("codigo")
     col_tipo = cols.get("tipo")
     col_letra = cols.get("letra")
 
     if not col_cod or not col_tipo or not col_letra:
-        raise ValueError("TABLAARCA no tiene columnas esperadas: Código/Tipo/Letra")
+        raise ValueError("TABLAARCA debe tener columnas: Código, Tipo, Letra")
 
     lk = {}
     for _, r in tabla.iterrows():
@@ -223,21 +231,60 @@ def build_tabla_lookup(tabla: pd.DataFrame) -> dict:
             k = str(int(float(k)))
         except Exception:
             pass
-
-        # Normalizar recibos
         if t == "RC":
             t = "R"
-
         lk[k] = (t, l)
     return lk
 
+@st.cache_data(show_spinner=False)
+def build_tabla_lookup_cached(file_bytes: bytes, filename: str) -> dict:
+    tabla_df = read_tablaarca_any_bytes(file_bytes, filename)
+    return build_tabla_lookup(tabla_df)
+
+def get_default_tablaarca_bytes() -> tuple[bytes | None, str | None]:
+    """
+    Busca TABLAARCA en ubicaciones razonables:
+    - misma carpeta que el script (tu caso actual: /assets/TABLAARCA.xlsx)
+    - carpeta assets al lado del script (si en el futuro movés el script a root)
+    """
+    candidates = [
+        HERE / "TABLAARCA.xlsx",
+        HERE / "assets" / "TABLAARCA.xlsx",
+        HERE / "TABLAARCACGT.xlsx",
+        HERE / "assets" / "TABLAARCACGT.xlsx",
+    ]
+    for p in candidates:
+        if p.exists():
+            return p.read_bytes(), p.name
+    return None, None
+
+def get_tabla_lookup() -> dict:
+    # 1) override (si el usuario tilda actualizar)
+    if tablaarca_override is not None:
+        b = tablaarca_override.getvalue()
+        lk = build_tabla_lookup_cached(b, tablaarca_override.name)
+        st.session_state["tablaarca_lookup"] = lk
+        st.success("TABLAARCA actualizada (override) y cacheada.")
+        return lk
+
+    # 2) session_state (ya cargada en esta sesión)
+    if "tablaarca_lookup" in st.session_state and st.session_state["tablaarca_lookup"]:
+        return st.session_state["tablaarca_lookup"]
+
+    # 3) default desde repo
+    b, name = get_default_tablaarca_bytes()
+    if b is not None:
+        lk = build_tabla_lookup_cached(b, name)
+        st.session_state["tablaarca_lookup"] = lk
+        return lk
+
+    return {}
+
 def map_tipo_from_xlsx_text(desc: str) -> tuple[str, str]:
     """
-    Fallback si no hay TABLAARCA: parsea texto tipo '1 - Factura A'
+    Fallback si no hay tabla y el XLSX trae texto tipo '1 - Factura A'
     """
     s = str(desc or "").strip()
-
-    # Cpbte
     su = s.upper()
     if "NOTA DE CREDITO" in su or "NOTA DE CRÉDITO" in su:
         t = "NC"
@@ -250,12 +297,11 @@ def map_tipo_from_xlsx_text(desc: str) -> tuple[str, str]:
     else:
         t = ""
 
-    # Letra
     letra = s[-1].upper() if s else ""
     if letra not in ("A", "B", "C"):
         letra = ""
 
-    # compatibilidad con tu regla heredada
+    # Regla heredada
     if s.startswith("8 ") and s.strip().upper().endswith("C"):
         letra = "B"
 
@@ -267,24 +313,27 @@ if uploaded is None:
     st.stop()
 
 df, kind = read_arca_file(uploaded)
+tabla_lookup = get_tabla_lookup()
 
-tabla_lookup = {}
-if tablaarca_file is not None:
-    tabla_df = read_tablaarca_any(tablaarca_file)
-    tabla_lookup = build_tabla_lookup(tabla_df)
+# En CSV el tipo de comprobante es código => requiere tabla
+if kind == "csv" and not tabla_lookup:
+    st.error(
+        "El archivo es CSV y no se encontró TABLAARCA en el repo.\n"
+        "Verificá que exista TABLAARCA.xlsx junto al script (en /assets) o tildá “Actualizar TABLAARCA”."
+    )
+    st.stop()
 
-# --- Columnas ARCA (CSV / XLSX) ---
+# --- Columnas ARCA ---
 COL_FECHA = pick_col(df, "Fecha de Emisión", "Fecha", "Fecha de Emision")
 COL_TIPO_COMP = pick_col(df, "Tipo de Comprobante", "Tipo")
 COL_PV = pick_col(df, "Punto de Venta", "Pto. Vta.", "Pto Vta", "Punto Venta")
 COL_NRO_DESDE = pick_col(df, "Número Desde", "Numero Desde")
-# COL_NRO_HASTA = pick_col(df, "Número Hasta", "Numero Hasta")  # no se usa
 
 COL_TIPO_DOC_REC = pick_col(df, "Tipo Doc. Receptor", "Tipo Doc Receptor")
 COL_NRO_DOC_REC = pick_col(df, "Nro. Doc. Receptor", "Nro Doc Receptor", "Nro Doc.", "Nro. Doc.")
 COL_NOM_REC = pick_col(df, "Denominación Receptor", "Denominacion Receptor")
 
-# Montos (ignoramos 0%, 2,5% y 5% por pedido)
+# Montos (ignoramos 0%, 2,5% y 5% => ni los leemos)
 COL_IVA_105 = pick_col(df, "IVA 10,5%")
 COL_NETO_105 = pick_col(df, "Imp. Neto Gravado IVA 10,5%", "Neto Grav. IVA 10,5%")
 COL_IVA_21 = pick_col(df, "IVA 21%")
@@ -297,11 +346,6 @@ COL_EXENTAS = pick_col(df, "Imp. Op. Exentas", "Op. Exentas")
 COL_OTROS = pick_col(df, "Otros Tributos")
 COL_TOTAL = pick_col(df, "Imp. Total")
 
-# Si es CSV, exigimos TABLAARCA para decodificar el código del comprobante
-if kind == "csv" and not tabla_lookup:
-    st.error("El archivo es CSV y no se cargó TABLAARCA. Subí TABLAARCA para decodificar 'Tipo de Comprobante'.")
-    st.stop()
-
 registros = []
 
 for _, row in df.iterrows():
@@ -309,28 +353,22 @@ for _, row in df.iterrows():
     if tipo_comp_raw is None or (isinstance(tipo_comp_raw, str) and not tipo_comp_raw.strip()):
         continue
 
-    # Decodificación de tipo/ letra
     cpbte, letra = "", ""
 
     if kind == "csv":
-        # 'Tipo de Comprobante' es código
+        # CSV: tipo comprobante es código -> TABLAARCA
         k = str(tipo_comp_raw).strip()
         try:
             k = str(int(float(k)))
         except Exception:
             pass
-        if k in tabla_lookup:
-            cpbte, letra = tabla_lookup[k]
-        else:
-            cpbte, letra = "", ""
+        cpbte, letra = tabla_lookup.get(k, ("", ""))
     else:
-        # XLSX: puede venir "1 - Factura A"
+        # XLSX: puede ser "1 - Factura A". Si detecto código y tengo tabla, la uso.
         s = str(tipo_comp_raw).strip()
-        # Si trae código al inicio y hay tabla, usamos tabla
         m = re.match(r"^\s*(\d+)\s*-", s)
         if m and tabla_lookup:
-            k = m.group(1)
-            cpbte, letra = tabla_lookup.get(k, ("", ""))
+            cpbte, letra = tabla_lookup.get(m.group(1), ("", ""))
         else:
             cpbte, letra = map_tipo_from_xlsx_text(s)
 
@@ -358,25 +396,24 @@ for _, row in df.iterrows():
 
     base = {
         "Fecha dd/mm/aaaa": row.get(COL_FECHA),
-        "Cpbte": cpbte,                  # F / NC / ND / R
-        "Tipo": letra,                   # A / B / C
+        "Cpbte": cpbte,  # F / NC / ND / R
+        "Tipo": letra,   # A / B / C
         "Suc.": row.get(COL_PV),
         "Número": row.get(COL_NRO_DESDE),
         "Razón Social o Denominación Cliente": row.get(COL_NOM_REC),
-        "Tipo Doc.": tipo_doc_numeric(row.get(COL_TIPO_DOC_REC)),   # CSV ya trae 80/96
+        "Tipo Doc.": tipo_doc_numeric(row.get(COL_TIPO_DOC_REC)),  # en CSV ya viene 80/96
         "CUIT": row.get(COL_NRO_DOC_REC),
         "Domicilio": "",
         "C.P.": "",
         "Pcia": "",
         "Cond Fisc": "RI" if letra == "A" else "MT",
-        "Cód. Neto": "",     # manual
-        "Cód. NG/EX": "",    # manual
-        "Cód. P/R": "",      # manual
+        "Cód. Neto": "",   # manual
+        "Cód. NG/EX": "",  # manual
+        "Cód. P/R": "",    # manual
         "Pcia P/R": "",
     }
 
     filas_comp = []
-
     aliquotas = [
         (10.5, COL_NETO_105, COL_IVA_105),
         (21.0, COL_NETO_21, COL_IVA_21),
@@ -398,13 +435,13 @@ for _, row in df.iterrows():
         rec["Perc./Ret."] = 0.0
         filas_comp.append(rec)
 
-    # Asignar NG/EX y Otros una sola vez (en la 1ra fila)
+    # NG/EX y Otros una sola vez (en la 1ra fila)
     if filas_comp:
         if exng_val != 0 or otros_val != 0:
             filas_comp[0]["Conceptos NG/EX"] = exng_val
             filas_comp[0]["Perc./Ret."] = otros_val
     else:
-        # Sin alícuotas: volcamos NG/EX y Otros; si solo hay Total, va a NG/EX
+        # Sin alícuotas: si hay solo total, va a NG/EX (casos tipo C)
         rec = base.copy()
         rec["Neto Gravado"] = 0.0
         rec["Alíc."] = 0.0
@@ -462,7 +499,7 @@ salida = pd.DataFrame(registros)[cols_salida]
 st.subheader("Vista previa de la salida")
 st.dataframe(salida.head(50))
 
-# --- Generar Excel para descargar ---
+# --- Export Excel ---
 buffer = BytesIO()
 with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
     salida.to_excel(writer, sheet_name="Salida", index=False)
@@ -475,15 +512,12 @@ with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
 
     col_idx = {name: i for i, name in enumerate(salida.columns)}
 
-    # Montos
     for nombre in ["Neto Gravado", "IVA Liquidado", "IVA Débito", "Conceptos NG/EX", "Perc./Ret.", "Total"]:
         j = col_idx[nombre]
         worksheet.set_column(j, j, 16, money_format)
 
-    # Alícuota
     worksheet.set_column(col_idx["Alíc."], col_idx["Alíc."], 8, aliq_format)
 
-    # Anchos básicos
     worksheet.set_column(col_idx["Razón Social o Denominación Cliente"], col_idx["Razón Social o Denominación Cliente"], 42)
     worksheet.set_column(col_idx["CUIT"], col_idx["CUIT"], 14)
     worksheet.set_column(col_idx["Cpbte"], col_idx["Cpbte"], 6)
@@ -500,7 +534,6 @@ st.download_button(
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
 
-# --- Footer ---
 st.markdown(
     "<br><hr style='opacity:0.3'><div style='text-align:center; "
     "font-size:12px; color:#6b7280;'>"
