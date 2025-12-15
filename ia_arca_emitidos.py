@@ -51,11 +51,13 @@ CREDITOS = {"NC", "PC"}  # crédito => negativo
 # ---------------- Paths / assets ----------------
 HERE = Path(__file__).parent
 
+
 def first_existing(paths):
     for p in paths:
         if p.exists():
             return p
     return None
+
 
 LOGO_PATH = first_existing([HERE / "logo_aie.png", HERE / "assets" / "logo_aie.png"])
 FAVICON_PATH = first_existing([HERE / "favicon-aie.ico", HERE / "assets" / "favicon-aie.ico"])
@@ -84,6 +86,7 @@ def sniff_delimiter(text: str) -> str:
     except Exception:
         return ";"
 
+
 def read_arca(file) -> tuple[pd.DataFrame, str]:
     name = (file.name or "").lower()
     if name.endswith(".csv"):
@@ -96,12 +99,14 @@ def read_arca(file) -> tuple[pd.DataFrame, str]:
     except Exception:
         return pd.read_excel(file, sheet_name=0, header=0, dtype=object), "xlsx"
 
+
 def pick_col(df: pd.DataFrame, *cands: str) -> str:
     cols = set(df.columns)
     for c in cands:
         if c in cols:
             return c
     raise KeyError(f"No se encontró ninguna de estas columnas: {cands}")
+
 
 def parse_amount(v) -> float:
     if v is None:
@@ -121,10 +126,12 @@ def parse_amount(v) -> float:
     except Exception:
         return 0.0
 
+
 def digits_only(v) -> str:
     if v is None:
         return ""
     return re.sub(r"\D+", "", str(v))
+
 
 def tipo_doc(v) -> int:
     if v is None:
@@ -144,27 +151,20 @@ def tipo_doc(v) -> int:
         return 96
     return 0
 
-def parse_fecha(v) -> datetime | None:
+
+def fecha_out(v) -> str:
     """
-    Devuelve datetime REAL (fecha con hora 00:00:00).
-    La visualización dd/mm/yyyy se define en el export.
+    NO parsear fechas.
+    - CSV: ya viene DD/MM/AAAA -> copiar tal cual.
+    - XLSX: si viene como date/datetime -> formatear DD/MM/AAAA.
+    - Si viene como string -> copiar tal cual.
     """
-    if v is None:
-        return None
-    if isinstance(v, float) and pd.isna(v):
-        return None
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return ""
+    if isinstance(v, (datetime, date)):
+        return v.strftime("%d/%m/%Y")
+    return str(v).strip()
 
-    if isinstance(v, datetime):
-        return v.replace(hour=0, minute=0, second=0, microsecond=0)
-
-    if isinstance(v, date):
-        return datetime(v.year, v.month, v.day)
-
-    dt = pd.to_datetime(v, errors="coerce", dayfirst=True)
-    if pd.isna(dt):
-        return None
-    py = dt.to_pydatetime()
-    return py.replace(hour=0, minute=0, second=0, microsecond=0)
 
 def map_tipo_from_text(desc: str) -> tuple[str, str]:
     s = str(desc or "").strip()
@@ -185,10 +185,12 @@ def map_tipo_from_text(desc: str) -> tuple[str, str]:
     if letra not in ("A", "B", "C", "M"):
         letra = ""
 
+    # compat recibidos (si apareciera el caso)
     if s.startswith("8 ") and s.strip().upper().endswith("C"):
         letra = "B"
 
     return t, letra
+
 
 def decode_csv_tipo(tipo_comp_raw: str) -> tuple[str, str]:
     k = str(tipo_comp_raw).strip()
@@ -197,6 +199,7 @@ def decode_csv_tipo(tipo_comp_raw: str) -> tuple[str, str]:
     except Exception:
         pass
     return TIPOS_COMP.get(k, ("", ""))
+
 
 # ---------------- Main ----------------
 df, kind = read_arca(uploaded)
@@ -210,6 +213,7 @@ COL_TIPO_DOC_REC = pick_col(df, "Tipo Doc. Receptor", "Tipo Doc Receptor")
 COL_NRO_DOC_REC = pick_col(df, "Nro. Doc. Receptor", "Nro Doc Receptor", "Nro Doc.", "Nro. Doc.")
 COL_NOM_REC = pick_col(df, "Denominación Receptor", "Denominacion Receptor")
 
+# Solo alícuotas consideradas (ignoramos 0%, 2.5%, 5%)
 COL_IVA_105 = pick_col(df, "IVA 10,5%")
 COL_NETO_105 = pick_col(df, "Imp. Neto Gravado IVA 10,5%", "Neto Grav. IVA 10,5%")
 COL_IVA_21 = pick_col(df, "IVA 21%")
@@ -248,6 +252,10 @@ for _, row in df.iterrows():
     cuit_out = nro_doc
     cond_fisc = ""
 
+    # Reglas que definiste:
+    # A 80 -> RI
+    # B 80 -> EX
+    # B 96 -> CF + CUIT armado "00-XXXXXXXX-0"
     if letra == "A" and tdoc == 80:
         cond_fisc = "RI"
     elif letra == "B" and tdoc == 80:
@@ -257,10 +265,12 @@ for _, row in df.iterrows():
         cuit_out = f"00-{dni8}-0"
         cond_fisc = "CF"
 
+    # Ex/Ng, otros, total
     exng_val = sg(parse_amount(row.get(COL_NETO_NG)) + parse_amount(row.get(COL_EXENTAS)))
     otros_val = sg(parse_amount(row.get(COL_OTROS)))
     total_val = sg(parse_amount(row.get(COL_TOTAL)))
 
+    # Solo 10.5 / 21 / 27
     netos_ivas = [
         sg(parse_amount(row.get(COL_NETO_105))), sg(parse_amount(row.get(COL_IVA_105))),
         sg(parse_amount(row.get(COL_NETO_21))),  sg(parse_amount(row.get(COL_IVA_21))),
@@ -272,7 +282,8 @@ for _, row in df.iterrows():
         continue
 
     base = {
-        "Fecha dd/mm/aaaa": parse_fecha(row.get(COL_FECHA)),  # datetime real
+        # NO tocamos la fecha: sale exactamente DD/MM/AAAA como viene de ARCA
+        "Fecha dd/mm/aaaa": fecha_out(row.get(COL_FECHA)),
         "Cpbte": cpbte,
         "Tipo": letra,
         "Suc.": row.get(COL_PV),
@@ -317,6 +328,7 @@ for _, row in df.iterrows():
             filas_comp[0]["Conceptos NG/EX"] = exng_val
             filas_comp[0]["Perc./Ret."] = otros_val
     else:
+        # Sin alícuotas: va todo a NG/EX (o exng/otros si existen)
         rec = base.copy()
         rec["Neto Gravado"] = 0.0
         rec["Alíc."] = 0.0
@@ -371,23 +383,12 @@ cols_salida = [
 
 salida = pd.DataFrame(registros)[cols_salida]
 
-# Asegurar datetime64 y eliminar componente hora (aunque quede 00:00:00)
-salida["Fecha dd/mm/aaaa"] = pd.to_datetime(salida["Fecha dd/mm/aaaa"], errors="coerce").dt.normalize()
-
-# Preview (mostrar DD/MM/AAAA)
-prev = salida.copy()
-prev["Fecha dd/mm/aaaa"] = prev["Fecha dd/mm/aaaa"].dt.strftime("%d/%m/%Y").fillna("")
 st.subheader("Vista previa de la salida")
-st.dataframe(prev.head(50))
+st.dataframe(salida.head(50))
 
 # ---------------- Export ----------------
 buffer = BytesIO()
-with pd.ExcelWriter(
-    buffer,
-    engine="xlsxwriter",
-    date_format="dd/mm/yyyy",
-    datetime_format="dd/mm/yyyy",
-) as writer:
+with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
     salida.to_excel(writer, sheet_name="Salida", index=False)
 
     wb = writer.book
@@ -395,12 +396,12 @@ with pd.ExcelWriter(
 
     money_fmt = wb.add_format({"num_format": "#,##0.00"})
     aliq_fmt = wb.add_format({"num_format": "00.000"})
-    date_fmt = wb.add_format({"num_format": "dd/mm/yyyy"})
+    text_fmt = wb.add_format({"num_format": "@"})  # texto
 
     col_idx = {c: i for i, c in enumerate(salida.columns)}
 
-    # Fecha visible dd/mm/yyyy
-    ws.set_column(col_idx["Fecha dd/mm/aaaa"], col_idx["Fecha dd/mm/aaaa"], 12, date_fmt)
+    # FECHA como texto para que Holistor no invierta día/mes
+    ws.set_column(col_idx["Fecha dd/mm/aaaa"], col_idx["Fecha dd/mm/aaaa"], 12, text_fmt)
 
     ws.set_column(col_idx["Cpbte"], col_idx["Cpbte"], 6)
     ws.set_column(col_idx["Tipo"], col_idx["Tipo"], 6)
