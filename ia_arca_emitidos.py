@@ -1,15 +1,5 @@
 # ia_arca_emitidos.py
 # ARCA Emitidos (XLSX o CSV) -> Formato Holistor (HWVta1modelo)
-# Reglas:
-# - Tipo comprobante: F / NC / ND (desde TABLAARCA para CSV; en XLSX por tabla si hay código, sino por texto)
-# - Letra: A/B/C
-# - NC: todos los importes negativos
-# - Ignorar alícuotas 0%, 2,5% y 5% (no se leen)
-# - Ignorar filas sin montos
-# - Fecha salida: DD/MM/AAAA
-# - Tipo Doc 96: CUIT = "00-" + DNI(8 dígitos) + "-0" y Cond Fisc = CF
-# - Tipo Doc 80: CUIT normalizado a dígitos y Cond Fisc: A->RI, B/C->MT
-# - Cód. Neto / Cód. NG/EX / Cód. P/R vacíos (manual)
 # AIE San Justo
 
 import streamlit as st
@@ -19,8 +9,49 @@ from pathlib import Path
 import csv
 import re
 
-# ---------------- Paths / assets ----------------
+# ---------------- Matriz interna (CSV) ----------------
+# Código -> (Cpbte, Letra)
+# Nota: RC se normaliza a R para el campo Cpbte
+TIPOS_COMP = {
+    "1": ("F", "A"),
+    "2": ("ND", "A"),
+    "3": ("NC", "A"),
+    "4": ("R", "A"),
+    # "5": (??)  # NOTAS DE VENTA AL CONTADO A (sin dato en tu tabla)
 
+    "6": ("F", "B"),
+    "7": ("ND", "B"),
+    "8": ("NC", "B"),
+    "9": ("R", "B"),
+
+    "11": ("F", "C"),
+    "12": ("ND", "C"),
+    "13": ("NC", "C"),
+    "15": ("R", "C"),
+
+    "51": ("F", "M"),
+    "52": ("ND", "M"),
+    "53": ("NC", "M"),
+    "54": ("R", "M"),
+
+    # FCE / MiPyME
+    "201": ("FP", "A"),
+    "202": ("NP", "A"),
+    "203": ("PC", "A"),
+
+    "206": ("FP", "B"),
+    "207": ("NP", "B"),
+    "208": ("PC", "B"),  # en tu tabla pegada decía FP, pero por lógica es crédito => PC
+
+    "211": ("FP", "C"),
+    "212": ("NP", "C"),
+    "213": ("PC", "C"),
+}
+
+# Créditos (hacer montos negativos)
+CREDITOS = {"NC", "PC"}  # Nota de crédito común y Nota de crédito electrónica
+
+# ---------------- Paths / assets ----------------
 HERE = Path(__file__).parent
 
 def first_existing(paths):
@@ -29,25 +60,10 @@ def first_existing(paths):
             return p
     return None
 
-LOGO_PATH = first_existing([
-    HERE / "logo_aie.png",
-    HERE / "assets" / "logo_aie.png",
-])
-
-FAVICON_PATH = first_existing([
-    HERE / "favicon-aie.ico",
-    HERE / "assets" / "favicon-aie.ico",
-])
-
-TABLAARCA_PATH = first_existing([
-    HERE / "TABLAARCA.xlsx",
-    HERE / "TABLAARCACGT.xlsx",
-    HERE / "assets" / "TABLAARCA.xlsx",
-    HERE / "assets" / "TABLAARCACGT.xlsx",
-])
+LOGO_PATH = first_existing([HERE / "logo_aie.png", HERE / "assets" / "logo_aie.png"])
+FAVICON_PATH = first_existing([HERE / "favicon-aie.ico", HERE / "assets" / "favicon-aie.ico"])
 
 # ---------------- UI ----------------
-
 st.set_page_config(
     page_title="ARCA Emitidos → Formato Holistor",
     page_icon=str(FAVICON_PATH) if FAVICON_PATH else None,
@@ -64,7 +80,6 @@ if uploaded is None:
     st.stop()
 
 # ---------------- Helpers ----------------
-
 def sniff_delimiter(text: str) -> str:
     try:
         d = csv.Sniffer().sniff(text[:5000], delimiters=";,|\t")
@@ -79,7 +94,6 @@ def read_arca(file) -> tuple[pd.DataFrame, str]:
         sep = sniff_delimiter(raw)
         df = pd.read_csv(BytesIO(file.getvalue()), sep=sep, dtype=str, encoding="utf-8")
         return df, "csv"
-    # XLSX: muchas veces header real en fila 2
     try:
         return pd.read_excel(file, sheet_name=0, header=1, dtype=object), "xlsx"
     except Exception:
@@ -127,7 +141,6 @@ def tipo_doc(v) -> int:
         return int(float(s))
     except Exception:
         pass
-    # fallback por texto (XLSX)
     if "CUIT" in s:
         return 80
     if "DNI" in s:
@@ -148,6 +161,7 @@ def format_ddmmyyyy(v) -> str:
     return dt.strftime("%d/%m/%Y")
 
 def map_tipo_from_text(desc: str) -> tuple[str, str]:
+    """Para XLSX cuando viene texto tipo '1 - Factura A'."""
     s = str(desc or "").strip()
     su = s.upper()
 
@@ -163,54 +177,29 @@ def map_tipo_from_text(desc: str) -> tuple[str, str]:
         t = ""
 
     letra = s[-1].upper() if s else ""
-    if letra not in ("A", "B", "C"):
+    if letra not in ("A", "B", "C", "M"):
         letra = ""
 
-    # regla heredada
+    # regla heredada que vos venías usando
     if s.startswith("8 ") and s.strip().upper().endswith("C"):
         letra = "B"
 
     return t, letra
 
-@st.cache_data(show_spinner=False)
-def load_tabla_lookup() -> dict:
+def decode_csv_tipo(tipo_comp_raw: str) -> tuple[str, str]:
     """
-    Devuelve lookup {codigo: (Cpbte, Letra)} desde TABLAARCA.xlsx
-    Columnas esperadas: Código | Tipo | Letra
+    CSV trae 'Tipo de Comprobante' como código.
+    Devuelve (Cpbte, Letra). Si no está en la matriz, devuelve ("","").
     """
-    if not TABLAARCA_PATH:
-        return {}
-
-    tabla = pd.read_excel(TABLAARCA_PATH, sheet_name=0, dtype=str)
-    cols = {str(c).strip().lower(): c for c in tabla.columns}
-
-    col_cod = cols.get("código") or cols.get("codigo")
-    col_tipo = cols.get("tipo")
-    col_letra = cols.get("letra")
-
-    if not col_cod or not col_tipo or not col_letra:
-        return {}
-
-    lk = {}
-    for _, r in tabla.iterrows():
-        k = str(r.get(col_cod, "")).strip()
-        t = str(r.get(col_tipo, "")).strip().upper()
-        l = str(r.get(col_letra, "")).strip().upper()
-        if not k or not t:
-            continue
-        try:
-            k = str(int(float(k)))
-        except Exception:
-            pass
-        if t == "RC":
-            t = "R"
-        lk[k] = (t, l)
-    return lk
+    k = str(tipo_comp_raw).strip()
+    try:
+        k = str(int(float(k)))
+    except Exception:
+        pass
+    return TIPOS_COMP.get(k, ("", ""))
 
 # ---------------- Main ----------------
-
 df, kind = read_arca(uploaded)
-tabla_lookup = load_tabla_lookup()
 
 # Columnas base
 COL_FECHA = pick_col(df, "Fecha de Emisión", "Fecha", "Fecha de Emision")
@@ -235,14 +224,6 @@ COL_EXENTAS = pick_col(df, "Imp. Op. Exentas", "Op. Exentas")
 COL_OTROS = pick_col(df, "Otros Tributos")
 COL_TOTAL = pick_col(df, "Imp. Total")
 
-# CSV: el tipo de comprobante suele ser un código => necesita tabla en repo
-if kind == "csv" and not tabla_lookup:
-    st.error(
-        "El archivo es CSV y no se encontró TABLAARCA.xlsx en el repo.\n"
-        "Dejá TABLAARCA.xlsx en la raíz del repo o en /assets."
-    )
-    st.stop()
-
 registros = []
 
 for _, row in df.iterrows():
@@ -250,36 +231,23 @@ for _, row in df.iterrows():
     if tipo_comp_raw is None or (isinstance(tipo_comp_raw, str) and not tipo_comp_raw.strip()):
         continue
 
-    # (Cpbte, Letra)
-    cpbte, letra = "", ""
-
+    # Tipo comprobante + letra
     if kind == "csv":
-        k = str(tipo_comp_raw).strip()
-        try:
-            k = str(int(float(k)))
-        except Exception:
-            pass
-        cpbte, letra = tabla_lookup.get(k, ("", ""))
+        cpbte, letra = decode_csv_tipo(tipo_comp_raw)
     else:
-        s = str(tipo_comp_raw).strip()
-        m = re.match(r"^\s*(\d+)\s*-", s)
-        if m and tabla_lookup:
-            cpbte, letra = tabla_lookup.get(m.group(1), ("", ""))
-        else:
-            cpbte, letra = map_tipo_from_text(s)
+        cpbte, letra = map_tipo_from_text(tipo_comp_raw)
 
-    es_nc = (cpbte == "NC")
+    es_credito = (cpbte in CREDITOS)
 
     def sg(x: float) -> float:
         if x == 0:
             return 0.0
-        return -abs(x) if es_nc else abs(x)
+        return -abs(x) if es_credito else abs(x)
 
     # Tipo doc / nro doc
     tdoc = tipo_doc(row.get(COL_TIPO_DOC_REC))
     nro_doc = digits_only(row.get(COL_NRO_DOC_REC))
 
-    # DNI fijo 8 dígitos + Condición fiscal CF
     if tdoc == 96 and nro_doc:
         dni8 = nro_doc.zfill(8)
         cuit_out = f"00-{dni8}-0"
@@ -350,20 +318,17 @@ for _, row in df.iterrows():
             filas_comp[0]["Conceptos NG/EX"] = exng_val
             filas_comp[0]["Perc./Ret."] = otros_val
     else:
-        # Sin alícuotas: si solo total -> NG/EX
         rec = base.copy()
         rec["Neto Gravado"] = 0.0
         rec["Alíc."] = 0.0
         rec["IVA Liquidado"] = 0.0
         rec["IVA Débito"] = 0.0
-
         if exng_val != 0 or otros_val != 0:
             rec["Conceptos NG/EX"] = exng_val
             rec["Perc./Ret."] = otros_val
         else:
             rec["Conceptos NG/EX"] = total_val
             rec["Perc./Ret."] = 0.0
-
         filas_comp.append(rec)
 
     for rec in filas_comp:
@@ -411,20 +376,18 @@ st.subheader("Vista previa de la salida")
 st.dataframe(salida.head(50))
 
 # ---------------- Export ----------------
-
 buffer = BytesIO()
 with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
     salida.to_excel(writer, sheet_name="Salida", index=False)
 
-    workbook = writer.book
+    wb = writer.book
     ws = writer.sheets["Salida"]
 
-    money_fmt = workbook.add_format({"num_format": "#,##0.00"})
-    aliq_fmt = workbook.add_format({"num_format": "00.000"})
+    money_fmt = wb.add_format({"num_format": "#,##0.00"})
+    aliq_fmt = wb.add_format({"num_format": "00.000"})
 
     col_idx = {c: i for i, c in enumerate(salida.columns)}
 
-    # Anchos / formatos
     ws.set_column(col_idx["Fecha dd/mm/aaaa"], col_idx["Fecha dd/mm/aaaa"], 12)
     ws.set_column(col_idx["Cpbte"], col_idx["Cpbte"], 6)
     ws.set_column(col_idx["Tipo"], col_idx["Tipo"], 6)
