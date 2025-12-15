@@ -8,7 +8,7 @@ from io import BytesIO
 from pathlib import Path
 import csv
 import re
-from datetime import date
+from datetime import date, datetime
 
 # ---------------- Matriz interna (CSV) ----------------
 TIPOS_COMP = {
@@ -144,18 +144,23 @@ def tipo_doc(v) -> int:
         return 96
     return 0
 
-def parse_date_ddmmyyyy(v) -> date | None:
+def parse_date_ddmmyyyy(v) -> datetime | None:
     """
-    Devuelve fecha REAL (date) para exportar a Excel con formato dd/mm/yyyy.
+    Devuelve datetime REAL (no texto) para que Excel lo trate como FECHA real.
+    Luego se fuerza formato dd/mm/yyyy en la columna.
     """
     if v is None:
         return None
     if isinstance(v, float) and pd.isna(v):
         return None
 
-    # Si ya es datetime/date:
+    # Si ya es datetime:
+    if isinstance(v, datetime):
+        return v.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    # Si es date (pero no datetime):
     if isinstance(v, date):
-        return v
+        return datetime(v.year, v.month, v.day)
 
     s = str(v).strip()
     if not s:
@@ -164,7 +169,9 @@ def parse_date_ddmmyyyy(v) -> date | None:
     dt = pd.to_datetime(s, errors="coerce", dayfirst=True)
     if pd.isna(dt):
         return None
-    return dt.date()
+
+    py = dt.to_pydatetime()
+    return py.replace(hour=0, minute=0, second=0, microsecond=0)
 
 def map_tipo_from_text(desc: str) -> tuple[str, str]:
     s = str(desc or "").strip()
@@ -271,7 +278,7 @@ for _, row in df.iterrows():
         continue
 
     base = {
-        # Fecha REAL: se formatea en el Excel con dd/mm/yyyy
+        # Fecha REAL (datetime)
         "Fecha dd/mm/aaaa": parse_date_ddmmyyyy(row.get(COL_FECHA)),
         "Cpbte": cpbte,
         "Tipo": letra,
@@ -371,18 +378,18 @@ cols_salida = [
 
 salida = pd.DataFrame(registros)[cols_salida]
 
-# Preview (mostrar DD/MM/AAAA como texto)
-prev = salida.copy()
-prev["Fecha dd/mm/aaaa"] = prev["Fecha dd/mm/aaaa"].apply(
-    lambda x: x.strftime("%d/%m/%Y") if isinstance(x, date) else ""
-)
+# Forzar dtype datetime (evita que quede como texto ISO en Excel)
+salida["Fecha dd/mm/aaaa"] = pd.to_datetime(salida["Fecha dd/mm/aaaa"], errors="coerce")
 
+# Preview (mostrar DD/MM/AAAA)
+prev = salida.copy()
+prev["Fecha dd/mm/aaaa"] = prev["Fecha dd/mm/aaaa"].dt.strftime("%d/%m/%Y").fillna("")
 st.subheader("Vista previa de la salida")
 st.dataframe(prev.head(50))
 
 # ---------------- Export ----------------
 buffer = BytesIO()
-with pd.ExcelWriter(buffer, engine="xlsxwriter", datetime_format="dd/mm/yyyy") as writer:
+with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
     salida.to_excel(writer, sheet_name="Salida", index=False)
 
     wb = writer.book
@@ -394,7 +401,7 @@ with pd.ExcelWriter(buffer, engine="xlsxwriter", datetime_format="dd/mm/yyyy") a
 
     col_idx = {c: i for i, c in enumerate(salida.columns)}
 
-    # Fecha forzada dd/mm/yyyy
+    # Fecha forzada dd/mm/yyyy (VISIBLE)
     ws.set_column(col_idx["Fecha dd/mm/aaaa"], col_idx["Fecha dd/mm/aaaa"], 12, date_fmt)
 
     ws.set_column(col_idx["Cpbte"], col_idx["Cpbte"], 6)
