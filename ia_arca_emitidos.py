@@ -144,32 +144,25 @@ def tipo_doc(v) -> int:
         return 96
     return 0
 
-def parse_date_ddmmyyyy(v) -> datetime | None:
+def parse_fecha(v) -> datetime | None:
     """
-    Devuelve datetime REAL (no texto) para que Excel lo trate como FECHA real.
-    Luego se fuerza formato dd/mm/yyyy en la columna.
+    Devuelve datetime REAL (fecha con hora 00:00:00).
+    La visualización dd/mm/yyyy se define en el export.
     """
     if v is None:
         return None
     if isinstance(v, float) and pd.isna(v):
         return None
 
-    # Si ya es datetime:
     if isinstance(v, datetime):
         return v.replace(hour=0, minute=0, second=0, microsecond=0)
 
-    # Si es date (pero no datetime):
     if isinstance(v, date):
         return datetime(v.year, v.month, v.day)
 
-    s = str(v).strip()
-    if not s:
-        return None
-
-    dt = pd.to_datetime(s, errors="coerce", dayfirst=True)
+    dt = pd.to_datetime(v, errors="coerce", dayfirst=True)
     if pd.isna(dt):
         return None
-
     py = dt.to_pydatetime()
     return py.replace(hour=0, minute=0, second=0, microsecond=0)
 
@@ -274,12 +267,12 @@ for _, row in df.iterrows():
         sg(parse_amount(row.get(COL_NETO_27))),  sg(parse_amount(row.get(COL_IVA_27))),
     ]
 
+    # Ignorar filas sin montos
     if exng_val == 0 and otros_val == 0 and total_val == 0 and all(v == 0 for v in netos_ivas):
         continue
 
     base = {
-        # Fecha REAL (datetime)
-        "Fecha dd/mm/aaaa": parse_date_ddmmyyyy(row.get(COL_FECHA)),
+        "Fecha dd/mm/aaaa": parse_fecha(row.get(COL_FECHA)),  # datetime real
         "Cpbte": cpbte,
         "Tipo": letra,
         "Suc.": row.get(COL_PV),
@@ -378,8 +371,8 @@ cols_salida = [
 
 salida = pd.DataFrame(registros)[cols_salida]
 
-# Forzar dtype datetime (evita que quede como texto ISO en Excel)
-salida["Fecha dd/mm/aaaa"] = pd.to_datetime(salida["Fecha dd/mm/aaaa"], errors="coerce")
+# Asegurar datetime64 y eliminar componente hora (aunque quede 00:00:00)
+salida["Fecha dd/mm/aaaa"] = pd.to_datetime(salida["Fecha dd/mm/aaaa"], errors="coerce").dt.normalize()
 
 # Preview (mostrar DD/MM/AAAA)
 prev = salida.copy()
@@ -389,7 +382,12 @@ st.dataframe(prev.head(50))
 
 # ---------------- Export ----------------
 buffer = BytesIO()
-with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
+with pd.ExcelWriter(
+    buffer,
+    engine="xlsxwriter",
+    date_format="dd/mm/yyyy",
+    datetime_format="dd/mm/yyyy",
+) as writer:
     salida.to_excel(writer, sheet_name="Salida", index=False)
 
     wb = writer.book
@@ -401,7 +399,7 @@ with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
 
     col_idx = {c: i for i, c in enumerate(salida.columns)}
 
-    # Fecha forzada dd/mm/yyyy (VISIBLE)
+    # Fecha visible dd/mm/yyyy
     ws.set_column(col_idx["Fecha dd/mm/aaaa"], col_idx["Fecha dd/mm/aaaa"], 12, date_fmt)
 
     ws.set_column(col_idx["Cpbte"], col_idx["Cpbte"], 6)
