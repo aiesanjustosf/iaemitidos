@@ -11,13 +11,12 @@ import re
 
 # ---------------- Matriz interna (CSV) ----------------
 # Código -> (Cpbte, Letra)
-# Nota: RC se normaliza a R para el campo Cpbte
 TIPOS_COMP = {
     "1": ("F", "A"),
     "2": ("ND", "A"),
     "3": ("NC", "A"),
     "4": ("R", "A"),
-    # "5": (??)  # NOTAS DE VENTA AL CONTADO A (sin dato en tu tabla)
+    # "5": ("", ""),  # NOTAS DE VENTA AL CONTADO A (sin mapeo)
 
     "6": ("F", "B"),
     "7": ("ND", "B"),
@@ -41,15 +40,14 @@ TIPOS_COMP = {
 
     "206": ("FP", "B"),
     "207": ("NP", "B"),
-    "208": ("PC", "B"),  # en tu tabla pegada decía FP, pero por lógica es crédito => PC
-
+    "208": ("PC", "B"),
     "211": ("FP", "C"),
     "212": ("NP", "C"),
     "213": ("PC", "C"),
 }
 
-# Créditos (hacer montos negativos)
-CREDITOS = {"NC", "PC"}  # Nota de crédito común y Nota de crédito electrónica
+# Créditos => importes negativos
+CREDITOS = {"NC", "PC"}
 
 # ---------------- Paths / assets ----------------
 HERE = Path(__file__).parent
@@ -130,6 +128,10 @@ def digits_only(v) -> str:
     return re.sub(r"\D+", "", str(v))
 
 def tipo_doc(v) -> int:
+    """
+    CSV suele venir 80/96 numérico.
+    XLSX puede venir como texto 'CUIT'/'DNI' o numérico.
+    """
     if v is None:
         return 0
     if isinstance(v, float) and pd.isna(v):
@@ -161,7 +163,7 @@ def format_ddmmyyyy(v) -> str:
     return dt.strftime("%d/%m/%Y")
 
 def map_tipo_from_text(desc: str) -> tuple[str, str]:
-    """Para XLSX cuando viene texto tipo '1 - Factura A'."""
+    """Para XLSX cuando viene texto tipo '1 - Factura A' / 'Nota de Crédito B'."""
     s = str(desc or "").strip()
     su = s.upper()
 
@@ -180,17 +182,14 @@ def map_tipo_from_text(desc: str) -> tuple[str, str]:
     if letra not in ("A", "B", "C", "M"):
         letra = ""
 
-    # regla heredada que vos venías usando
+    # regla heredada
     if s.startswith("8 ") and s.strip().upper().endswith("C"):
         letra = "B"
 
     return t, letra
 
 def decode_csv_tipo(tipo_comp_raw: str) -> tuple[str, str]:
-    """
-    CSV trae 'Tipo de Comprobante' como código.
-    Devuelve (Cpbte, Letra). Si no está en la matriz, devuelve ("","").
-    """
+    """CSV trae código."""
     k = str(tipo_comp_raw).strip()
     try:
         k = str(int(float(k)))
@@ -248,13 +247,20 @@ for _, row in df.iterrows():
     tdoc = tipo_doc(row.get(COL_TIPO_DOC_REC))
     nro_doc = digits_only(row.get(COL_NRO_DOC_REC))
 
-    if tdoc == 96 and nro_doc:
+    # CUIT salida + Condición fiscal (sin MT)
+    cuit_out = nro_doc
+    cond_fisc = ""
+
+    if letra == "A" and tdoc == 80:
+        cond_fisc = "RI"
+
+    elif letra == "B" and tdoc == 80:
+        cond_fisc = "EX"
+
+    elif letra == "B" and tdoc == 96 and nro_doc:
         dni8 = nro_doc.zfill(8)
         cuit_out = f"00-{dni8}-0"
         cond_fisc = "CF"
-    else:
-        cuit_out = nro_doc
-        cond_fisc = "RI" if letra == "A" else "MT"
 
     # Importes
     exng_val = sg(parse_amount(row.get(COL_NETO_NG)) + parse_amount(row.get(COL_EXENTAS)))
