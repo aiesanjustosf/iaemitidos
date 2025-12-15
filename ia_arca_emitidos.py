@@ -8,15 +8,14 @@ from io import BytesIO
 from pathlib import Path
 import csv
 import re
+from datetime import date
 
 # ---------------- Matriz interna (CSV) ----------------
-# Código -> (Cpbte, Letra)
 TIPOS_COMP = {
     "1": ("F", "A"),
     "2": ("ND", "A"),
     "3": ("NC", "A"),
     "4": ("R", "A"),
-    # "5": ("", ""),  # NOTAS DE VENTA AL CONTADO A (sin mapeo)
 
     "6": ("F", "B"),
     "7": ("ND", "B"),
@@ -41,13 +40,13 @@ TIPOS_COMP = {
     "206": ("FP", "B"),
     "207": ("NP", "B"),
     "208": ("PC", "B"),
+
     "211": ("FP", "C"),
     "212": ("NP", "C"),
     "213": ("PC", "C"),
 }
 
-# Créditos => importes negativos
-CREDITOS = {"NC", "PC"}
+CREDITOS = {"NC", "PC"}  # crédito => negativo
 
 # ---------------- Paths / assets ----------------
 HERE = Path(__file__).parent
@@ -128,10 +127,6 @@ def digits_only(v) -> str:
     return re.sub(r"\D+", "", str(v))
 
 def tipo_doc(v) -> int:
-    """
-    CSV suele venir 80/96 numérico.
-    XLSX puede venir como texto 'CUIT'/'DNI' o numérico.
-    """
     if v is None:
         return 0
     if isinstance(v, float) and pd.isna(v):
@@ -149,21 +144,29 @@ def tipo_doc(v) -> int:
         return 96
     return 0
 
-def format_ddmmyyyy(v) -> str:
+def parse_date_ddmmyyyy(v) -> date | None:
+    """
+    Devuelve fecha REAL (date) para exportar a Excel con formato dd/mm/yyyy.
+    """
     if v is None:
-        return ""
+        return None
     if isinstance(v, float) and pd.isna(v):
-        return ""
+        return None
+
+    # Si ya es datetime/date:
+    if isinstance(v, date):
+        return v
+
     s = str(v).strip()
     if not s:
-        return ""
+        return None
+
     dt = pd.to_datetime(s, errors="coerce", dayfirst=True)
     if pd.isna(dt):
-        return s
-    return dt.strftime("%d/%m/%Y")
+        return None
+    return dt.date()
 
 def map_tipo_from_text(desc: str) -> tuple[str, str]:
-    """Para XLSX cuando viene texto tipo '1 - Factura A' / 'Nota de Crédito B'."""
     s = str(desc or "").strip()
     su = s.upper()
 
@@ -182,14 +185,12 @@ def map_tipo_from_text(desc: str) -> tuple[str, str]:
     if letra not in ("A", "B", "C", "M"):
         letra = ""
 
-    # regla heredada
     if s.startswith("8 ") and s.strip().upper().endswith("C"):
         letra = "B"
 
     return t, letra
 
 def decode_csv_tipo(tipo_comp_raw: str) -> tuple[str, str]:
-    """CSV trae código."""
     k = str(tipo_comp_raw).strip()
     try:
         k = str(int(float(k)))
@@ -200,7 +201,6 @@ def decode_csv_tipo(tipo_comp_raw: str) -> tuple[str, str]:
 # ---------------- Main ----------------
 df, kind = read_arca(uploaded)
 
-# Columnas base
 COL_FECHA = pick_col(df, "Fecha de Emisión", "Fecha", "Fecha de Emision")
 COL_TIPO_COMP = pick_col(df, "Tipo de Comprobante", "Tipo")
 COL_PV = pick_col(df, "Punto de Venta", "Pto. Vta.", "Pto Vta", "Punto Venta")
@@ -210,7 +210,6 @@ COL_TIPO_DOC_REC = pick_col(df, "Tipo Doc. Receptor", "Tipo Doc Receptor")
 COL_NRO_DOC_REC = pick_col(df, "Nro. Doc. Receptor", "Nro Doc Receptor", "Nro Doc.", "Nro. Doc.")
 COL_NOM_REC = pick_col(df, "Denominación Receptor", "Denominacion Receptor")
 
-# Montos (solo 10,5 / 21 / 27)
 COL_IVA_105 = pick_col(df, "IVA 10,5%")
 COL_NETO_105 = pick_col(df, "Imp. Neto Gravado IVA 10,5%", "Neto Grav. IVA 10,5%")
 COL_IVA_21 = pick_col(df, "IVA 21%")
@@ -230,7 +229,6 @@ for _, row in df.iterrows():
     if tipo_comp_raw is None or (isinstance(tipo_comp_raw, str) and not tipo_comp_raw.strip()):
         continue
 
-    # Tipo comprobante + letra
     if kind == "csv":
         cpbte, letra = decode_csv_tipo(tipo_comp_raw)
     else:
@@ -243,26 +241,22 @@ for _, row in df.iterrows():
             return 0.0
         return -abs(x) if es_credito else abs(x)
 
-    # Tipo doc / nro doc
     tdoc = tipo_doc(row.get(COL_TIPO_DOC_REC))
     nro_doc = digits_only(row.get(COL_NRO_DOC_REC))
 
-    # CUIT salida + Condición fiscal (sin MT)
+    # Condición fiscal (sin MT)
     cuit_out = nro_doc
     cond_fisc = ""
 
     if letra == "A" and tdoc == 80:
         cond_fisc = "RI"
-
     elif letra == "B" and tdoc == 80:
         cond_fisc = "EX"
-
     elif letra == "B" and tdoc == 96 and nro_doc:
         dni8 = nro_doc.zfill(8)
         cuit_out = f"00-{dni8}-0"
         cond_fisc = "CF"
 
-    # Importes
     exng_val = sg(parse_amount(row.get(COL_NETO_NG)) + parse_amount(row.get(COL_EXENTAS)))
     otros_val = sg(parse_amount(row.get(COL_OTROS)))
     total_val = sg(parse_amount(row.get(COL_TOTAL)))
@@ -273,12 +267,12 @@ for _, row in df.iterrows():
         sg(parse_amount(row.get(COL_NETO_27))),  sg(parse_amount(row.get(COL_IVA_27))),
     ]
 
-    # Ignorar filas sin montos
     if exng_val == 0 and otros_val == 0 and total_val == 0 and all(v == 0 for v in netos_ivas):
         continue
 
     base = {
-        "Fecha dd/mm/aaaa": format_ddmmyyyy(row.get(COL_FECHA)),
+        # Fecha REAL: se formatea en el Excel con dd/mm/yyyy
+        "Fecha dd/mm/aaaa": parse_date_ddmmyyyy(row.get(COL_FECHA)),
         "Cpbte": cpbte,
         "Tipo": letra,
         "Suc.": row.get(COL_PV),
@@ -318,7 +312,6 @@ for _, row in df.iterrows():
         rec["Perc./Ret."] = 0.0
         filas_comp.append(rec)
 
-    # NG/EX y Otros: en la 1ra fila
     if filas_comp:
         if exng_val != 0 or otros_val != 0:
             filas_comp[0]["Conceptos NG/EX"] = exng_val
@@ -378,12 +371,18 @@ cols_salida = [
 
 salida = pd.DataFrame(registros)[cols_salida]
 
+# Preview (mostrar DD/MM/AAAA como texto)
+prev = salida.copy()
+prev["Fecha dd/mm/aaaa"] = prev["Fecha dd/mm/aaaa"].apply(
+    lambda x: x.strftime("%d/%m/%Y") if isinstance(x, date) else ""
+)
+
 st.subheader("Vista previa de la salida")
-st.dataframe(salida.head(50))
+st.dataframe(prev.head(50))
 
 # ---------------- Export ----------------
 buffer = BytesIO()
-with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
+with pd.ExcelWriter(buffer, engine="xlsxwriter", datetime_format="dd/mm/yyyy") as writer:
     salida.to_excel(writer, sheet_name="Salida", index=False)
 
     wb = writer.book
@@ -391,10 +390,13 @@ with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
 
     money_fmt = wb.add_format({"num_format": "#,##0.00"})
     aliq_fmt = wb.add_format({"num_format": "00.000"})
+    date_fmt = wb.add_format({"num_format": "dd/mm/yyyy"})
 
     col_idx = {c: i for i, c in enumerate(salida.columns)}
 
-    ws.set_column(col_idx["Fecha dd/mm/aaaa"], col_idx["Fecha dd/mm/aaaa"], 12)
+    # Fecha forzada dd/mm/yyyy
+    ws.set_column(col_idx["Fecha dd/mm/aaaa"], col_idx["Fecha dd/mm/aaaa"], 12, date_fmt)
+
     ws.set_column(col_idx["Cpbte"], col_idx["Cpbte"], 6)
     ws.set_column(col_idx["Tipo"], col_idx["Tipo"], 6)
     ws.set_column(col_idx["Suc."], col_idx["Suc."], 8)
