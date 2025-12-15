@@ -154,16 +154,41 @@ def tipo_doc(v) -> int:
 
 def fecha_out(v) -> str:
     """
-    NO parsear fechas.
-    - CSV: ya viene DD/MM/AAAA -> copiar tal cual.
-    - XLSX: si viene como date/datetime -> formatear DD/MM/AAAA.
-    - Si viene como string -> copiar tal cual.
+    Devuelve SIEMPRE texto DD/MM/AAAA.
+    - Si viene DD/MM/AAAA: lo deja igual.
+    - Si viene ISO YYYY-MM-DD o YYYY-MM-DD HH:MM:SS: lo convierte a DD/MM/AAAA.
+    - Si viene date/datetime: lo formatea DD/MM/AAAA.
+    - Si viene vacío: "".
     """
     if v is None or (isinstance(v, float) and pd.isna(v)):
         return ""
+
+    # date/datetime nativos
     if isinstance(v, (datetime, date)):
         return v.strftime("%d/%m/%Y")
-    return str(v).strip()
+
+    s = str(v).strip()
+    if not s:
+        return ""
+
+    # Ya DD/MM/AAAA (o DD-MM-AAAA) -> no tocar
+    if re.fullmatch(r"\d{2}[/-]\d{2}[/-]\d{4}", s):
+        return s.replace("-", "/")
+
+    # ISO YYYY-MM-DD (con o sin hora) -> convertir
+    if re.match(r"^\d{4}-\d{2}-\d{2}(\s+\d{2}:\d{2}:\d{2})?$", s):
+        dt = pd.to_datetime(s, errors="coerce")  # ISO se parsea bien
+        if not pd.isna(dt):
+            return dt.strftime("%d/%m/%Y")
+
+    # Fallback: intentar parsear, pero sin “inventar” (dayfirst=True)
+    dt = pd.to_datetime(s, errors="coerce", dayfirst=True)
+    if not pd.isna(dt):
+        return dt.strftime("%d/%m/%Y")
+
+    # Último recurso: devolver tal cual
+    return s
+
 
 
 def map_tipo_from_text(desc: str) -> tuple[str, str]:
