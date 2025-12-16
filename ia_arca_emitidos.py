@@ -138,10 +138,6 @@ def tipo_doc(v) -> int:
 def fecha_out(v) -> str:
     """
     Devuelve SIEMPRE texto DD/MM/AAAA.
-    - Si viene DD/MM/AAAA: lo deja igual.
-    - Si viene ISO YYYY-MM-DD o YYYY-MM-DD HH:MM:SS: lo convierte a DD/MM/AAAA.
-    - Si viene date/datetime: lo formatea DD/MM/AAAA.
-    - Si viene vacío: "".
     """
     if v is None or (isinstance(v, float) and pd.isna(v)):
         return ""
@@ -201,7 +197,6 @@ def map_tipo_from_text(desc: str) -> tuple[str, str]:
     if letra not in ("A", "B", "C", "M"):
         letra = ""
 
-    # compat recibidos (si apareciera el caso)
     if s.startswith("8 ") and s.strip().upper().endswith("C"):
         letra = "B"
 
@@ -230,7 +225,6 @@ def process_arca(uploaded) -> tuple[pd.DataFrame, list[str]]:
     COL_NRO_DOC_REC = pick_col(df, "Nro. Doc. Receptor", "Nro Doc Receptor", "Nro Doc.", "Nro. Doc.")
     COL_NOM_REC = pick_col(df, "Denominación Receptor", "Denominacion Receptor")
 
-    # Solo alícuotas consideradas (ignoramos 0%, 2.5%, 5%)
     COL_IVA_105 = pick_col(df, "IVA 10,5%")
     COL_NETO_105 = pick_col(df, "Imp. Neto Gravado IVA 10,5%", "Neto Grav. IVA 10,5%")
     COL_IVA_21 = pick_col(df, "IVA 21%")
@@ -265,14 +259,9 @@ def process_arca(uploaded) -> tuple[pd.DataFrame, list[str]]:
         tdoc = tipo_doc(row.get(COL_TIPO_DOC_REC))
         nro_doc = digits_only(row.get(COL_NRO_DOC_REC))
 
-        # Condición fiscal (sin MT)
         cuit_out = nro_doc
         cond_fisc = ""
 
-        # Reglas:
-        # A 80 -> RI
-        # B 80 -> EX
-        # B 96 -> CF + CUIT armado "00-XXXXXXXX-0"
         if letra == "A" and tdoc == 80:
             cond_fisc = "RI"
         elif letra == "B" and tdoc == 80:
@@ -382,12 +371,7 @@ def process_arca(uploaded) -> tuple[pd.DataFrame, list[str]]:
 
 
 # ---------------- Pastor Chess ----------------
-PASTOR_SKIP = {
-    "ANTICIPO",
-    "COMODATO ACTIVOS FIJOS",
-    "SOBRANTE DE LIQUIDACION",
-    "RECIBO",
-}
+PASTOR_SKIP = {"ANTICIPO", "COMODATO ACTIVOS FIJOS", "SOBRANTE DE LIQUIDACION", "RECIBO"}
 
 PASTOR_PERCEP_MAP = [
     ("Percepción 3337", "PV07"),
@@ -402,20 +386,19 @@ def process_pastor(uploaded) -> tuple[pd.DataFrame, list[str]]:
     warnings: list[str] = []
     df = pd.read_excel(uploaded, sheet_name=0, header=0, dtype=object)
 
-    # columnas base (por nombre real del archivo Pastor Chess)
+    # Base por columnas (si existen por nombre). Si no, fallback por letra como referencia.
     COL_FECHA = pick_col(df, "Fecha Comprobante")
-    COL_DESC_COMP = pick_col(df, "Descripcion Comprobante", "Descripción Comprobante")
+    COL_DESC_COMP = pick_col(df, "Descripcion Comprobante", "Descripción Comprobante", "Comprobante")
     COL_LETRA = pick_col(df, "Letra")
-    COL_SUC = pick_col(df, "Serie \\ Punto de venta", "Serie / Punto de venta", "Serie / Punto de Venta")
+    COL_SUC = pick_col(df, "Serie \\ Punto de venta", "Serie / Punto de venta", "Serie / Punto de Venta", "Punto de Venta", "Punto de venta")
     COL_NUM = pick_col(df, "Numero", "Número")
     COL_RS = pick_col(df, "Razon Social", "Razón Social")
     COL_TDOC = pick_col(df, "Tipo Id", "Tipo ID", "Tipo Id.")
-    COL_DDOC = pick_col(df, "Descripción Id", "Descripcion Id")
-    COL_NDOC = pick_col(df, "Identificador")
-    COL_PCIA = pick_col(df, "Provincia")
+    COL_NDOC = pick_col(df, "Identificador", "Código Identificación", "Codigo Identificacion")
+    COL_PCIA = pick_col(df, "Provincia", "Pcia", "Provincia (BN)") if ("Provincia" in df.columns or "Pcia" in df.columns) else pick_col(df, "BN")
     COL_COND = pick_col(df, "Tipo IVA", "Condición fiscal", "Condicion fiscal", "Cond Fisc")
 
-    COL_NETO = pick_col(df, "Subtotal Neto")
+    COL_NETO = pick_col(df, "Subtotal Neto", "Neto", "Neto Gravado")
     COL_IVA = pick_col(df, "I.V.A", "IVA")
     COL_TOTAL = pick_col(df, "Subtotal Final", "Total")
 
@@ -425,12 +408,9 @@ def process_pastor(uploaded) -> tuple[pd.DataFrame, list[str]]:
         desc = str(row.get(COL_DESC_COMP, "") or "").strip().upper()
         if not desc:
             continue
-
-        # excluir tipos
         if desc in PASTOR_SKIP:
             continue
 
-        # cpbte
         if desc == "FACTURA":
             cpbte = "F"
         elif desc == "NOTA DE CREDITO":
@@ -438,7 +418,6 @@ def process_pastor(uploaded) -> tuple[pd.DataFrame, list[str]]:
         elif desc == "NOTA DE DEBITO":
             cpbte = "ND"
         else:
-            # no procesar otros
             continue
 
         es_credito = (cpbte == "NC")
@@ -451,24 +430,22 @@ def process_pastor(uploaded) -> tuple[pd.DataFrame, list[str]]:
         letra = str(row.get(COL_LETRA, "") or "").strip().upper()
         suc = row.get(COL_SUC)
         nro = row.get(COL_NUM)
-
         rs = row.get(COL_RS)
 
         tdoc = tipo_doc(row.get(COL_TDOC))
         nro_doc = digits_only(row.get(COL_NDOC))
 
-        # DNI => 00-XXXXXXXX-0 (8 dígitos fijos)
         cuit_out = nro_doc
         if tdoc == 96 and nro_doc:
             dni8 = nro_doc.zfill(8)
             cuit_out = f"00-{dni8}-0"
 
-        # Condición fiscal
         cond = str(row.get(COL_COND, "") or "").strip().upper()
         if cond == "MT":
             cond = "MTD"
 
-        pcia = str(row.get(COL_PCIA, "") or "").strip()
+        # Provincia: SIEMPRE desde BN (como pediste)
+        pcia = str(row.get("BN", row.get(COL_PCIA, "")) or "").strip()
 
         neto = sg(parse_amount(row.get(COL_NETO)))
         iva = sg(parse_amount(row.get(COL_IVA)))
@@ -482,7 +459,6 @@ def process_pastor(uploaded) -> tuple[pd.DataFrame, list[str]]:
                     f"Fila {i+2}: IVA no cuadra con 21% (Neto={neto:,.2f} / IVA={iva:,.2f} / Esperado≈{sg(esperado):,.2f})."
                 )
 
-        # percepciones presentes
         percs = []
         for col_name, cod_pr in PASTOR_PERCEP_MAP:
             if col_name in df.columns:
@@ -490,7 +466,6 @@ def process_pastor(uploaded) -> tuple[pd.DataFrame, list[str]]:
                 if val != 0:
                     percs.append((cod_pr, val, col_name))
 
-        # Si no hay montos (ni neto/iva ni percepciones), omitir
         if neto == 0 and iva == 0 and not percs:
             continue
 
@@ -507,22 +482,17 @@ def process_pastor(uploaded) -> tuple[pd.DataFrame, list[str]]:
             "C.P.": "",
             "Pcia": pcia,
             "Cond Fisc": cond,
-            "Cód. Neto": "135",
+            "Cód. Neto": "135",  # SIEMPRE 135, incluso en filas extra
             "Cód. NG/EX": "",
             "Cód. P/R": "",
             "Pcia P/R": "",
         }
 
-        # Armado de líneas:
-        # - 0 percepciones: una línea neto/iva
-        # - 1 percepción: va en la MISMA línea neto/iva
-        # - >1 percepciones: primera en la línea principal; resto en líneas extra sin neto/iva
         lineas = []
 
-        # Línea principal
         main = base.copy()
         main["Neto Gravado"] = neto
-        main["Alíc."] = 21.0  # 21,000
+        main["Alíc."] = 21.0
         main["IVA Liquidado"] = iva
         main["IVA Débito"] = iva
         main["Conceptos NG/EX"] = 0.0
@@ -533,7 +503,6 @@ def process_pastor(uploaded) -> tuple[pd.DataFrame, list[str]]:
             main["Cód. P/R"] = cod_pr0
             main["Perc./Ret."] = val0
 
-        # Total línea principal (suma de componentes)
         main["Total"] = (
             float(main["Neto Gravado"] or 0)
             + float(main["IVA Liquidado"] or 0)
@@ -542,11 +511,10 @@ def process_pastor(uploaded) -> tuple[pd.DataFrame, list[str]]:
         )
         lineas.append(main)
 
-        # Líneas extra para percepciones adicionales
         if len(percs) > 1:
             for cod_pr, val, _colname in percs[1:]:
                 extra = base.copy()
-                extra["Cód. Neto"] = ""         # no repetir
+                # mantener Cód. Neto = 135 (pedido)
                 extra["Neto Gravado"] = 0.0
                 extra["Alíc."] = 0.0
                 extra["IVA Liquidado"] = 0.0
@@ -557,7 +525,6 @@ def process_pastor(uploaded) -> tuple[pd.DataFrame, list[str]]:
                 extra["Total"] = float(val or 0)
                 lineas.append(extra)
 
-        # Check total vs origen (solo informativo)
         total_calc = sum(float(x.get("Total", 0) or 0) for x in lineas)
         if total_origen != 0 and round(total_calc, 2) != round(total_origen, 2):
             warnings.append(
@@ -630,10 +597,8 @@ with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
 
     col_idx = {c: i for i, c in enumerate(salida.columns)}
 
-    # FECHA como texto para que Holistor no invierta día/mes
     ws.set_column(col_idx["Fecha dd/mm/aaaa"], col_idx["Fecha dd/mm/aaaa"], 12, text_fmt)
 
-    # anchos
     ws.set_column(col_idx["Cpbte"], col_idx["Cpbte"], 6)
     ws.set_column(col_idx["Tipo"], col_idx["Tipo"], 6)
     ws.set_column(col_idx["Suc."], col_idx["Suc."], 10)
@@ -641,7 +606,6 @@ with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
     ws.set_column(col_idx["Razón Social o Denominación Cliente"], col_idx["Razón Social o Denominación Cliente"], 42)
     ws.set_column(col_idx["CUIT"], col_idx["CUIT"], 16)
 
-    # importes
     for nombre in ["Neto Gravado", "IVA Liquidado", "IVA Débito", "Conceptos NG/EX", "Perc./Ret.", "Total"]:
         if nombre in col_idx:
             ws.set_column(col_idx[nombre], col_idx[nombre], 16, money_fmt)
