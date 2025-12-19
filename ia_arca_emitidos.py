@@ -270,6 +270,10 @@ def process_arca(uploaded) -> tuple[pd.DataFrame, list[str]]:
             dni8 = nro_doc.zfill(8)
             cuit_out = f"00-{dni8}-0"
             cond_fisc = "CF"
+         elif letra == "B" and tdoc == 86 and nro_doc:
+            dni8 = nro_doc.zfill(8)
+            cuit_out = f"00-{dni8}-0"
+            cond_fisc = "CF"
 
         exng_val = sg(parse_amount(row.get(COL_NETO_NG)) + parse_amount(row.get(COL_EXENTAS)))
         otros_val = sg(parse_amount(row.get(COL_OTROS)))
