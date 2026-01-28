@@ -226,7 +226,6 @@ def process_arca(uploaded) -> tuple[pd.DataFrame, list[str]]:
     COL_NOM_REC = pick_col(df, "Denominación Receptor", "Denominacion Receptor")
 
     # --- USD: Moneda (K) y Tipo de cambio (J) ---
-    # Preferimos por nombre; si no están, igual salimos con columnas vacías/0.0
     COL_TC = None
     COL_MON = None
     for cand in ("Tipo de cambio", "Tipo Cambio", "Tipo de Cambio"):
@@ -323,21 +322,21 @@ def process_arca(uploaded) -> tuple[pd.DataFrame, list[str]]:
             "Tipo": letra,
             "Suc.": row.get(COL_PV),
             "Número": row.get(COL_NRO_DESDE),
-            "Razón Social o Denominación Cliente": row.get(COL_NOM_REC),
+            "Razón Social o Denominación Cliente": row.get(COL_NOM_REC)),
             "Tipo Doc.": tdoc,
             "CUIT": cuit_out,
             "Domicilio": "",
             "C.P.": "",
             "Pcia": "",
             "Cond Fisc": cond_fisc,
+            # >>> antes de la columna M (Cód. Neto)
+            "Moneda": moneda,
+            "Tipo de cambio": tc,
+            # <<<
             "Cód. Neto": "",
             "Cód. NG/EX": "",
             "Cód. P/R": "",
             "Pcia P/R": "",
-            # >>> visibles en grilla/salida
-            "Moneda": moneda,
-            "Tipo de cambio": tc,
-            # <<<
         }
 
         filas_comp = []
@@ -396,11 +395,13 @@ def process_arca(uploaded) -> tuple[pd.DataFrame, list[str]]:
         "Fecha dd/mm/aaaa", "Cpbte", "Tipo", "Suc.", "Número",
         "Razón Social o Denominación Cliente", "Tipo Doc.", "CUIT",
         "Domicilio", "C.P.", "Pcia", "Cond Fisc",
+        # >>> antes de la columna M (Cód. Neto)
+        "Moneda", "Tipo de cambio",
+        # <<<
         "Cód. Neto", "Neto Gravado", "Alíc.",
         "IVA Liquidado", "IVA Débito",
         "Cód. NG/EX", "Conceptos NG/EX",
         "Cód. P/R", "Perc./Ret.", "Pcia P/R",
-        "Moneda", "Tipo de cambio",
         "Total",
     ]
 
@@ -424,7 +425,6 @@ def process_pastor(uploaded) -> tuple[pd.DataFrame, list[str]]:
     warnings: list[str] = []
     df = pd.read_excel(uploaded, sheet_name=0, header=0, dtype=object)
 
-    # Base por columnas (si existen por nombre). Si no, fallback por letra como referencia.
     COL_FECHA = pick_col(df, "Fecha Comprobante")
     COL_DESC_COMP = pick_col(df, "Descripcion Comprobante", "Descripción Comprobante", "Comprobante")
     COL_LETRA = pick_col(df, "Letra")
@@ -482,14 +482,12 @@ def process_pastor(uploaded) -> tuple[pd.DataFrame, list[str]]:
         if cond == "MT":
             cond = "MTD"
 
-        # Provincia: SIEMPRE desde BN (como pediste)
         pcia = str(row.get("BN", row.get(COL_PCIA, "")) or "").strip()
 
         neto = sg(parse_amount(row.get(COL_NETO)))
         iva = sg(parse_amount(row.get(COL_IVA)))
         total_origen = sg(parse_amount(row.get(COL_TOTAL)))
 
-        # chequeo IVA 21%
         if neto != 0:
             esperado = round(abs(neto) * 0.21, 2)
             if round(abs(iva), 2) not in (esperado, round(esperado + 0.01, 2), round(esperado - 0.01, 2)):
@@ -520,14 +518,14 @@ def process_pastor(uploaded) -> tuple[pd.DataFrame, list[str]]:
             "C.P.": "",
             "Pcia": pcia,
             "Cond Fisc": cond,
-            "Cód. Neto": "135",  # SIEMPRE 135, incluso en filas extra
-            "Cód. NG/EX": "",
-            "Cód. P/R": "",
-            "Pcia P/R": "",
-            # >>> visibles en grilla/salida (sin uso en Pastor)
+            # >>> antes de la columna M (Cód. Neto)
             "Moneda": "",
             "Tipo de cambio": 0.0,
             # <<<
+            "Cód. Neto": "135",
+            "Cód. NG/EX": "",
+            "Cód. P/R": "",
+            "Pcia P/R": "",
         }
 
         lineas = []
@@ -556,7 +554,6 @@ def process_pastor(uploaded) -> tuple[pd.DataFrame, list[str]]:
         if len(percs) > 1:
             for cod_pr, val, _colname in percs[1:]:
                 extra = base.copy()
-                # mantener Cód. Neto = 135 (pedido)
                 extra["Neto Gravado"] = 0.0
                 extra["Alíc."] = 0.0
                 extra["IVA Liquidado"] = 0.0
@@ -582,11 +579,13 @@ def process_pastor(uploaded) -> tuple[pd.DataFrame, list[str]]:
         "Fecha dd/mm/aaaa", "Cpbte", "Tipo", "Suc.", "Número",
         "Razón Social o Denominación Cliente", "Tipo Doc.", "CUIT",
         "Domicilio", "C.P.", "Pcia", "Cond Fisc",
+        # >>> antes de la columna M (Cód. Neto)
+        "Moneda", "Tipo de cambio",
+        # <<<
         "Cód. Neto", "Neto Gravado", "Alíc.",
         "IVA Liquidado", "IVA Débito",
         "Cód. NG/EX", "Conceptos NG/EX",
         "Cód. P/R", "Perc./Ret.", "Pcia P/R",
-        "Moneda", "Tipo de cambio",
         "Total",
     ]
 
@@ -649,7 +648,6 @@ with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
     ws.set_column(col_idx["Razón Social o Denominación Cliente"], col_idx["Razón Social o Denominación Cliente"], 42)
     ws.set_column(col_idx["CUIT"], col_idx["CUIT"], 16)
 
-    # Moneda / Tipo de cambio visibles
     if "Moneda" in col_idx:
         ws.set_column(col_idx["Moneda"], col_idx["Moneda"], 10)
     if "Tipo de cambio" in col_idx:
