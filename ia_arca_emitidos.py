@@ -322,7 +322,7 @@ def process_arca(uploaded) -> tuple[pd.DataFrame, list[str]]:
             "Tipo": letra,
             "Suc.": row.get(COL_PV),
             "Número": row.get(COL_NRO_DESDE),
-            "Razón Social o Denominación Cliente": row.get(COL_NOM_REC)),
+            "Razón Social o Denominación Cliente": row.get(COL_NOM_REC),
             "Tipo Doc.": tdoc,
             "CUIT": cuit_out,
             "Domicilio": "",
