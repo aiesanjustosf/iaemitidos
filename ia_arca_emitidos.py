@@ -225,6 +225,19 @@ def process_arca(uploaded) -> tuple[pd.DataFrame, list[str]]:
     COL_NRO_DOC_REC = pick_col(df, "Nro. Doc. Receptor", "Nro Doc Receptor", "Nro Doc.", "Nro. Doc.")
     COL_NOM_REC = pick_col(df, "Denominación Receptor", "Denominacion Receptor")
 
+    # --- USD: Moneda (K) y Tipo de cambio (J) ---
+    # (no rompe si no existen en algún layout)
+    COL_TC = None
+    COL_MON = None
+    for cand in ("Tipo de cambio", "Tipo Cambio", "Tipo de Cambio"):
+        if cand in df.columns:
+            COL_TC = cand
+            break
+    for cand in ("Moneda", "Currency"):
+        if cand in df.columns:
+            COL_MON = cand
+            break
+
     COL_IVA_105 = pick_col(df, "IVA 10,5%")
     COL_NETO_105 = pick_col(df, "Imp. Neto Gravado IVA 10,5%", "Neto Grav. IVA 10,5%")
     COL_IVA_21 = pick_col(df, "IVA 21%")
@@ -256,6 +269,22 @@ def process_arca(uploaded) -> tuple[pd.DataFrame, list[str]]:
                 return 0.0
             return -abs(x) if es_credito else abs(x)
 
+        # --- conversión USD antes de seguir ---
+        moneda = str(row.get(COL_MON, "") or "").strip().upper() if COL_MON else ""
+        tc = parse_amount(row.get(COL_TC)) if COL_TC else 0.0
+
+        if moneda == "USD" and tc == 0:
+            warnings.append(
+                f"Fila con Moneda=USD sin Tipo de cambio (Cpbte={tipo_comp_raw}). Se deja sin conversión."
+            )
+
+        def amt(colname: str) -> float:
+            v = parse_amount(row.get(colname))
+            if moneda == "USD" and tc != 0:
+                return v * tc
+            return v
+        # -----------------------------------
+
         tdoc = tipo_doc(row.get(COL_TIPO_DOC_REC))
         nro_doc = digits_only(row.get(COL_NRO_DOC_REC))
 
@@ -275,15 +304,14 @@ def process_arca(uploaded) -> tuple[pd.DataFrame, list[str]]:
             cuit_out = f"00-{dni8}-0"
             cond_fisc = "CF"
 
-
-        exng_val = sg(parse_amount(row.get(COL_NETO_NG)) + parse_amount(row.get(COL_EXENTAS)))
-        otros_val = sg(parse_amount(row.get(COL_OTROS)))
-        total_val = sg(parse_amount(row.get(COL_TOTAL)))
+        exng_val = sg(amt(COL_NETO_NG) + amt(COL_EXENTAS))
+        otros_val = sg(amt(COL_OTROS))
+        total_val = sg(amt(COL_TOTAL))
 
         netos_ivas = [
-            sg(parse_amount(row.get(COL_NETO_105))), sg(parse_amount(row.get(COL_IVA_105))),
-            sg(parse_amount(row.get(COL_NETO_21))),  sg(parse_amount(row.get(COL_IVA_21))),
-            sg(parse_amount(row.get(COL_NETO_27))),  sg(parse_amount(row.get(COL_IVA_27))),
+            sg(amt(COL_NETO_105)), sg(amt(COL_IVA_105)),
+            sg(amt(COL_NETO_21)),  sg(amt(COL_IVA_21)),
+            sg(amt(COL_NETO_27)),  sg(amt(COL_IVA_27)),
         ]
 
         if exng_val == 0 and otros_val == 0 and total_val == 0 and all(v == 0 for v in netos_ivas):
@@ -316,8 +344,8 @@ def process_arca(uploaded) -> tuple[pd.DataFrame, list[str]]:
         ]
 
         for aliq_val, col_neto, col_iva in aliquotas:
-            neto = sg(parse_amount(row.get(col_neto)))
-            iva = sg(parse_amount(row.get(col_iva)))
+            neto = sg(amt(col_neto))
+            iva = sg(amt(col_iva))
             if neto == 0 and iva == 0:
                 continue
 
