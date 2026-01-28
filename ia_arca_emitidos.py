@@ -226,7 +226,7 @@ def process_arca(uploaded) -> tuple[pd.DataFrame, list[str]]:
     COL_NOM_REC = pick_col(df, "Denominación Receptor", "Denominacion Receptor")
 
     # --- USD: Moneda (K) y Tipo de cambio (J) ---
-    # (no rompe si no existen en algún layout)
+    # Preferimos por nombre; si no están, igual salimos con columnas vacías/0.0
     COL_TC = None
     COL_MON = None
     for cand in ("Tipo de cambio", "Tipo Cambio", "Tipo de Cambio"):
@@ -334,6 +334,10 @@ def process_arca(uploaded) -> tuple[pd.DataFrame, list[str]]:
             "Cód. NG/EX": "",
             "Cód. P/R": "",
             "Pcia P/R": "",
+            # >>> visibles en grilla/salida
+            "Moneda": moneda,
+            "Tipo de cambio": tc,
+            # <<<
         }
 
         filas_comp = []
@@ -396,6 +400,7 @@ def process_arca(uploaded) -> tuple[pd.DataFrame, list[str]]:
         "IVA Liquidado", "IVA Débito",
         "Cód. NG/EX", "Conceptos NG/EX",
         "Cód. P/R", "Perc./Ret.", "Pcia P/R",
+        "Moneda", "Tipo de cambio",
         "Total",
     ]
 
@@ -519,6 +524,10 @@ def process_pastor(uploaded) -> tuple[pd.DataFrame, list[str]]:
             "Cód. NG/EX": "",
             "Cód. P/R": "",
             "Pcia P/R": "",
+            # >>> visibles en grilla/salida (sin uso en Pastor)
+            "Moneda": "",
+            "Tipo de cambio": 0.0,
+            # <<<
         }
 
         lineas = []
@@ -577,6 +586,7 @@ def process_pastor(uploaded) -> tuple[pd.DataFrame, list[str]]:
         "IVA Liquidado", "IVA Débito",
         "Cód. NG/EX", "Conceptos NG/EX",
         "Cód. P/R", "Perc./Ret.", "Pcia P/R",
+        "Moneda", "Tipo de cambio",
         "Total",
     ]
 
@@ -638,6 +648,12 @@ with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
     ws.set_column(col_idx["Número"], col_idx["Número"], 12)
     ws.set_column(col_idx["Razón Social o Denominación Cliente"], col_idx["Razón Social o Denominación Cliente"], 42)
     ws.set_column(col_idx["CUIT"], col_idx["CUIT"], 16)
+
+    # Moneda / Tipo de cambio visibles
+    if "Moneda" in col_idx:
+        ws.set_column(col_idx["Moneda"], col_idx["Moneda"], 10)
+    if "Tipo de cambio" in col_idx:
+        ws.set_column(col_idx["Tipo de cambio"], col_idx["Tipo de cambio"], 12, money_fmt)
 
     for nombre in ["Neto Gravado", "IVA Liquidado", "IVA Débito", "Conceptos NG/EX", "Perc./Ret.", "Total"]:
         if nombre in col_idx:
