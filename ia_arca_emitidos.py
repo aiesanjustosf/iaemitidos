@@ -182,16 +182,32 @@ def map_tipo_from_text(desc: str) -> tuple[str, str]:
     s = str(desc or "").strip()
     su = s.upper()
 
-    if "NOTA DE CRÉDITO" in su or "NOTA DE CREDITO" in su:
-        t = "NC"
-    elif "NOTA DE DÉBITO" in su or "NOTA DE DEBITO" in su:
-        t = "ND"
-    elif "RECIBO" in su:
-        t = "R"
-    elif "FACTURA" in su:
-        t = "F"
+    # --- MiPyME / FCE: evaluar ANTES que la lógica genérica ---
+    if (
+        "MIPYME" in su
+        or "FCE" in su
+        or "FACTURA DE CRÉDITO ELECTRÓNICA" in su
+        or "FACTURA DE CREDITO ELECTRONICA" in su
+    ):
+        if "NOTA DE CRÉDITO" in su or "NOTA DE CREDITO" in su:
+            t = "PC"
+        elif "NOTA DE DÉBITO" in su or "NOTA DE DEBITO" in su:
+            t = "NP"
+        elif "FACTURA DE CRÉDITO" in su or "FACTURA DE CREDITO" in su:
+            t = "FP"
+        else:
+            t = ""
     else:
-        t = ""
+        if "NOTA DE CRÉDITO" in su or "NOTA DE CREDITO" in su:
+            t = "NC"
+        elif "NOTA DE DÉBITO" in su or "NOTA DE DEBITO" in su:
+            t = "ND"
+        elif "RECIBO" in su:
+            t = "R"
+        elif "FACTURA" in su:
+            t = "F"
+        else:
+            t = ""
 
     letra = s[-1].upper() if s else ""
     if letra not in ("A", "B", "C", "M"):
