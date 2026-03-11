@@ -28,6 +28,18 @@ TIPOS_COMP = {
     "52": ("ND", "M"),
     "53": ("NC", "M"),
     "54": ("R", "M"),
+
+    # Tickets
+    "81": ("T", "A"),   # TIQUE FACTURA A
+    "82": ("T", "B"),   # TIQUE FACTURA B
+    "83": ("T", "C"),   # TIQUE
+    "112": ("TC", "A"), # TIQUE NOTA DE CREDITO A
+    "113": ("TC", "B"), # TIQUE NOTA DE CREDITO B
+    "114": ("TC", "C"), # TIQUE NOTA DE CREDITO C
+    "115": ("T", "A"),  # TIQUE NOTA DE DEBITO A
+    "116": ("T", "B"),  # TIQUE NOTA DE DEBITO B
+    "117": ("T", "C"),  # TIQUE NOTA DE DEBITO C
+
     # FCE / MiPyME
     "201": ("FP", "A"),
     "202": ("NP", "A"),
@@ -39,7 +51,7 @@ TIPOS_COMP = {
     "212": ("NP", "C"),
     "213": ("PC", "C"),
 }
-CREDITOS_ARCA = {"NC", "PC"}  # crédito => negativo
+CREDITOS_ARCA = {"NC", "PC", "TC"}  # crédito => negativo
 
 # ---------------- Paths / assets ----------------
 HERE = Path(__file__).parent
@@ -197,6 +209,14 @@ def map_tipo_from_text(desc: str) -> tuple[str, str]:
             t = "FP"
         else:
             t = ""
+
+    # --- Tickets / Tiques ---
+    elif "TIQUE" in su or "TICKET" in su:
+        if "NOTA DE CRÉDITO" in su or "NOTA DE CREDITO" in su:
+            t = "TC"
+        else:
+            t = "T"
+
     else:
         if "NOTA DE CRÉDITO" in su or "NOTA DE CREDITO" in su:
             t = "NC"
@@ -215,6 +235,10 @@ def map_tipo_from_text(desc: str) -> tuple[str, str]:
 
     if s.startswith("8 ") and s.strip().upper().endswith("C"):
         letra = "B"
+
+    # Caso específico: 083 TIQUE (*) => T / C
+    if ("TIQUE" in su or "TICKET" in su) and not letra:
+        letra = "C"
 
     return t, letra
 
